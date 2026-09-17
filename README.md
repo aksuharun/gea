@@ -198,8 +198,8 @@ Each package has its own `build` script. The root `npm run build` builds all pac
 
 <a href="https://www.star-history.com/?repos=dashersw%2Fgea&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=dashersw/gea&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=dashersw/gea&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=dashersw/gea&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=dashersw/gea&type=date&theme=dark&legend=top-left&sealed_token=7B8JmFDsjz7vTQt5SdxtPK0Ev21pXOXHaRgXb1CYIwt-J_WV1mrv5dZoo-Fygcj1GqnQVvzLSnZSZvIAk_Nt7HeOMhFbcAQlHV8OLcmGN1TLLGt9QVOoHcXe0Wa7rN8fzxYDdteyiopf57lDH-UkZrf-9XgTcA2rKJNNjkgi6JkucsXvud2iqVxkUaQF" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=dashersw/gea&type=date&legend=top-left&sealed_token=7B8JmFDsjz7vTQt5SdxtPK0Ev21pXOXHaRgXb1CYIwt-J_WV1mrv5dZoo-Fygcj1GqnQVvzLSnZSZvIAk_Nt7HeOMhFbcAQlHV8OLcmGN1TLLGt9QVOoHcXe0Wa7rN8fzxYDdteyiopf57lDH-UkZrf-9XgTcA2rKJNNjkgi6JkucsXvud2iqVxkUaQF" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=dashersw/gea&type=date&legend=top-left&sealed_token=7B8JmFDsjz7vTQt5SdxtPK0Ev21pXOXHaRgXb1CYIwt-J_WV1mrv5dZoo-Fygcj1GqnQVvzLSnZSZvIAk_Nt7HeOMhFbcAQlHV8OLcmGN1TLLGt9QVOoHcXe0Wa7rN8fzxYDdteyiopf57lDH-UkZrf-9XgTcA2rKJNNjkgi6JkucsXvud2iqVxkUaQF" />
  </picture>
 </a>

@@ -2,24 +2,24 @@ import type { Disposer } from './disposer'
 import { bind } from './bind'
 import { patch } from './patch'
 
-export const reactiveTextValue = (
+export function reactiveTextValue(
   node: Text | Element,
   d: Disposer,
-  root: any,
+  root: object,
   pathOrGetter: readonly string[] | (() => unknown),
-): void => {
+): void {
   let prev: unknown = undefined
   bind(d, root, pathOrGetter, (v) => {
     prev = patch(node, 'text', prev, v)
   })
 }
 
-export const reactiveText = (
+export function reactiveText(
   node: Text | Element,
   d: Disposer,
-  root: any,
+  root: object,
   pathOrGetter: readonly string[] | (() => unknown),
-): void => {
+): void {
   let prev: unknown = undefined
   let live: Node = node
   // For array children (`.map(...)` returning DOM nodes), remember the live
@@ -32,7 +32,7 @@ export const reactiveText = (
       const nodes: Node[] = []
       for (const item of v) {
         if (item == null) continue
-        if (typeof (item as any).nodeType === 'number') {
+        if (typeof (item as Node).nodeType === 'number') {
           frag.appendChild(item as Node)
           nodes.push(item as Node)
         } else {
@@ -56,7 +56,7 @@ export const reactiveText = (
       for (const n of liveChildren) if (n.parentNode) n.parentNode.removeChild(n)
       liveChildren = null
     }
-    if (v && typeof (v as any).nodeType === 'number') {
+    if (v && typeof (v as Node).nodeType === 'number') {
       if (v === live) return
       const p = live.parentNode
       if (p) p.replaceChild(v as Node, live)

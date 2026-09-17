@@ -14,8 +14,21 @@ import { GEA_CREATE_TEMPLATE, GEA_DOM_COMPONENT, GEA_ELEMENT, GEA_ON_PROP_CHANGE
 import { GEA_CREATED_CALLED, GEA_DISPOSER, GEA_SET_PROPS } from './internal-symbols'
 import { createDisposer, type Disposer } from './disposer'
 import { Store } from '../store'
+import type { Renderable } from './renderable'
 
-type PropThunks = Record<string, () => any>
+/**
+ * One thunk per prop of `P`, each returning that prop's own type.
+ *
+ * Generic rather than a flat dictionary so a component's props keep their
+ * declared types all the way through `GEA_SET_PROPS` — the compiler emits one
+ * thunk per JSX attribute, so the mapping is exact at every instantiation.
+ *
+ * `children` is intersected in separately (not folded into the mapped part)
+ * because JSX always permits a childless invocation regardless of whether
+ * `P` declares a `children` field — the compiler attaches a children thunk
+ * whenever the call site has JSX children, independent of `P`'s own shape.
+ */
+type PropThunks<P> = { [K in keyof P]: () => P[K] } & { children?: () => Renderable }
 const GEA_COMPONENT_ID = Symbol()
 const GEA_LAST_PROP_VALUES = Symbol()
 
@@ -43,7 +56,7 @@ export class Component<P extends Record<string, any> = Record<string, any>> exte
   }
 
   /** Compiler-facing: install prop thunks. */
-  [GEA_SET_PROPS](thunks: PropThunks): void {
+  [GEA_SET_PROPS](thunks: PropThunks<P>): void {
     const createdCalled = this[GEA_CREATED_CALLED]
     const notifyPropChange = createdCalled ? (this as any)[GEA_ON_PROP_CHANGE] : undefined
     const prevValues: Record<string, any> | undefined =
@@ -61,16 +74,17 @@ export class Component<P extends Record<string, any> = Record<string, any>> exte
     // re-create DOM trees on every read without breaking identity. For primitive
     // (string/number/boolean) children the thunk stays live so reactive getters
     // pick up changes (e.g. `{inCart ? 'In Cart' : 'Add to Cart'}`).
-    if (typeof thunks.children === 'function') {
-      let cached: any = undefined
+    const childrenThunk = thunks.children
+    if (typeof childrenThunk === 'function') {
+      let cached: Renderable = undefined
       let cacheNode = false
       Object.defineProperty(out, 'children', {
         enumerable: true,
         configurable: true,
         get: () => {
           if (cacheNode) return cached
-          const v = thunks.children()
-          if (v && typeof v.nodeType === 'number') {
+          const v = childrenThunk()
+          if (v !== null && typeof v === 'object' && typeof (v as Node).nodeType === 'number') {
             cached = v
             cacheNode = true
           }

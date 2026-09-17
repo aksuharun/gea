@@ -3,7 +3,15 @@ import type { Change } from '../store'
 import { GEA_DIRTY, GEA_DIRTY_PROPS } from './dirty-symbols'
 import type { Disposer } from './disposer'
 
-const unwrap = (v: any): any => (v && typeof v === 'object' && v[GEA_PROXY_RAW]) || v
+// A top-level FUNCTION DECLARATION, not a `const` holding an arrow: an
+// unannotated module-scope callable const has no sealed binding subject
+// under geatsc (`representation-plan coverage gap for
+// VariableDeclaration`) because its `any -> any` signature admits no exact
+// ABI. A function declaration is its own emitted callable and needs no
+// value carrier. Body is unchanged.
+function unwrap(v: any): any {
+  return (v && typeof v === 'object' && v[GEA_PROXY_RAW]) || v
+}
 
 interface PropEntry {
   key: any
@@ -24,7 +32,14 @@ export interface PropKeyedListConfig {
 }
 
 export function keyedListProp(cfg: PropKeyedListConfig): void {
-  const { container, anchor, disposer, root, prop, key: keyFn, createEntry, patchEntry } = cfg
+  const container = cfg.container
+  const anchor = cfg.anchor
+  const disposer = cfg.disposer
+  const root = cfg.root
+  const prop = cfg.prop
+  const keyFn = cfg.key
+  const createEntry = cfg.createEntry
+  const patchEntry = cfg.patchEntry
   let entries: PropEntry[] = []
   const byKey = new Map<any, PropEntry>()
   if (cfg.onByKeyCreated) cfg.onByKeyCreated(byKey)
@@ -96,7 +111,7 @@ export function keyedListProp(cfg: PropKeyedListConfig): void {
         }
       }
 
-      if (aipuOnly && changes!.length === 2) {
+      if (aipuOnly && changes!.length > 1 && changes!.length < 3) {
         const a = changes![0].arix as number
         const b = changes![1].arix as number
         if (a >= 0 && b >= 0 && a < entries.length && b < entries.length && a !== b) {
@@ -177,7 +192,7 @@ export function keyedListProp(cfg: PropKeyedListConfig): void {
         totalRemoved += (change.count as number) || 0
       }
       if (onlyRemoves && entries.length - arr.length === totalRemoved) {
-        if (changes.length === 1 && (changes[0].count as number) === 1) {
+        if (changes.length < 2 && (changes[0].count as number) === 1) {
           const idx = changes[0].start as number
           if (idx >= 0 && idx < entries.length) {
             removeEntry(entries[idx])
@@ -294,19 +309,24 @@ export function keyedListProp(cfg: PropKeyedListConfig): void {
     }
 
     for (let i = 0; i < oldLen; i++) (entries[i] as any)._i = i
-    const seenOld = new Array<boolean>(oldLen).fill(false)
+    // A 0/1 number vector, not `boolean[]`. geatsc settles an element carrier
+    // for this vector that disagrees with the exact primitive-Boolean fact it
+    // derives for `!seenOld[i]`, and aborts the whole compile. Numbers carry
+    // the same one-bit state with a representation it can settle.
+    const seenOld: number[] = []
+    for (let i = 0; i < oldLen; i++) seenOld.push(0)
     const nextEntries = new Array<PropEntry>(newLen)
     for (let i = 0; i < newLen; i++) {
       const entry = byKey.get(newKeys[i])
       if (entry) {
         const oldIdx = (entry as any)._i as number
-        seenOld[oldIdx] = true
+        seenOld[oldIdx] = 1
         nextEntries[i] = entry
       }
     }
 
     for (let i = oldLen - 1; i >= 0; i--) {
-      if (!seenOld[i]) removeEntry(entries[i])
+      if (seenOld[i] === 0) removeEntry(entries[i])
     }
 
     let nextRef: Node = anchor

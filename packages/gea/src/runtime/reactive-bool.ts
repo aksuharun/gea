@@ -2,27 +2,27 @@ import type { Disposer } from './disposer'
 import { bind } from './bind'
 import { patch } from './patch'
 
-export const reactiveBoolAttr = (
+export function reactiveBoolAttr(
   el: Element,
   d: Disposer,
   root: any,
   target: string,
   pathOrGetter: readonly string[] | (() => unknown),
-): void => {
+): void {
   let prev: unknown = undefined
   bind(d, root, pathOrGetter, (v) => {
     prev = patch(el, 'bool', prev, v, target)
   })
 }
 
-export const reactiveBool = (
+export function reactiveBool(
   el: Element,
   d: Disposer,
   root: any,
   target: string,
   pathOrGetter: readonly string[] | (() => unknown),
   mode: 'attr' | 'visible' = 'attr',
-): void => {
+): void {
   if (mode === 'attr') {
     reactiveBoolAttr(el, d, root, target, pathOrGetter)
     return

@@ -19,9 +19,18 @@ import type { Disposer } from './disposer'
 import { readPath, subscribe } from './subscribe'
 import { withTracking } from './with-tracking'
 
+/**
+ * `root` is `object`, not `any`: every call site hands in a concrete
+ * component/store `this` (see `subscribe.ts`'s doc comment — the same
+ * reasoning applies here, one level up). `object` also happens to be exactly
+ * what both downstream calls need: `readPath`/`subscribe` accept the wider
+ * `object | null | undefined` (object is a subtype, no cast needed), and
+ * `withTracking` requires `object` outright — so no assertion is needed at
+ * either call site.
+ */
 export function bind(
   disposer: Disposer,
-  root: any,
+  root: object,
   pathOrGetter: readonly string[] | (() => unknown),
   apply: (v: unknown) => void,
 ): void {

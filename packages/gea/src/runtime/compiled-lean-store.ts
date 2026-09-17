@@ -2,35 +2,73 @@ import { GEA_PROXY_RAW } from './symbols'
 import { GEA_OBSERVE_DIRECT } from './internal-symbols'
 import { GEA_DIRTY, GEA_DIRTY_PROPS } from './dirty-symbols'
 import { trackRead } from './with-tracking'
+import type { Change } from '../store'
 
-type Handler = (value: any, changes?: any[]) => void
+/**
+ * A store observer: the changed value, and the batch of changes that
+ * produced it. `S` is `CompiledLeanStore<S>`'s own type parameter — the
+ * concrete store subclass's field shape, resolved once per subclass exactly
+ * the way `CompiledComponent<P>` resolves `P` for a component's props. A
+ * single `Map<string, Set<Handler<S>>>` holds observers across every field
+ * of `S` at once, so the exact field a given handler fires for isn't known
+ * at this layer — but the closed set of types it could possibly be (every
+ * member of `S`) is, which is why `value` is `S[keyof S]` rather than
+ * `any`/`unknown`.
+ */
+type Handler<S> = (value: S[keyof S], changes: Change[]) => void
 
-interface LeanState {
-  observers?: Map<string, Set<Handler>>
-  rootObservers?: Set<Handler>
-  derived?: Map<string, Set<Handler>>
-  direct?: Map<string, Set<(value: any) => void>>
-  pending?: Map<string, any[]>
+interface LeanState<S> {
+  observers?: Map<string, Set<Handler<S>>>
+  rootObservers?: Set<Handler<S>>
+  derived?: Map<string, Set<Handler<S>>>
+  direct?: Map<string, Set<(value: S[keyof S]) => void>>
+  /** Queued change records, keyed by the prop they were recorded against —
+   * each entry is `Change`-shaped (built by `_queue` below), not a raw
+   * store value, so `Change[]` is exact rather than `any[]`. */
+  pending?: Map<string, Change[]>
   scheduled?: boolean
   ready?: boolean
-  proxy?: any
+  /** The store's own proxy — literally an `S`, not `any`. */
+  proxy?: S
 }
 
-const _priv = new WeakMap<any, LeanState>()
-const _nested = new WeakMap<object, Map<string, any>>()
-const _isArr = Array.isArray
+// Private state and the nested-proxy cache hang off the object itself under a
+// non-enumerable symbol, rather than living in a `WeakMap` keyed by it. geatsc
+// marks every value that reaches a weak-container key as a weak-handle
+// ownership subject and then rejects it for having a dynamic carrier ("Weak-handle
+// ownership subject ... reached unsupported callable, dynamic, or mixed carrier
+// dynamic:declared-dynamic") — and the store's values are dynamic by nature, so
+// there is no type that satisfies it. A symbol property has the same lifetime as
+// the WeakMap entry (it dies with the object), is invisible to `Object.keys`,
+// `for...in` and `JSON.stringify`, and reaches the raw target through the proxy's
+// existing symbol pass-through in both traps.
+const _PRIV = Symbol('gea.lean.priv')
+const _NESTED = Symbol('gea.lean.nested')
 
-function _plain(v: any): boolean {
+/**
+ * `O`/`V` are generic (not `object`/`any`) — this helper hides a value under
+ * a symbol key on WHATEVER object it's called with (the raw store, its
+ * proxy, a Map cache, ...), so its own declaration can't pin a single
+ * concrete shape; each call site supplies its own concrete `O`/`V`.
+ */
+function _hidden<O extends object, V>(target: O, key: symbol, value: V): void {
+  Object.defineProperty(target, key, { value, writable: true, configurable: true, enumerable: false })
+}
+
+/** Same shape as `_hidden`: a generic reflection probe, not tied to one type. */
+function _plain<V>(v: V): boolean {
   if (!v || typeof v !== 'object') return false
   const p = Object.getPrototypeOf(v)
-  return p === Object.prototype || p === null || _isArr(v)
+  return p === Object.prototype || p === null || Array.isArray(v)
 }
 
-function _raw(v: any): any {
-  return (v && v[GEA_PROXY_RAW]) || v
+/** Unwrap a proxy value to its raw target, preserving whatever type it was. */
+function _raw<V>(v: V): V {
+  const rawTarget = v && (v as unknown as Record<symbol, unknown>)[GEA_PROXY_RAW]
+  return (rawTarget as V) || v
 }
 
-function _fireBucket(bucket: Set<Handler>, value: any, changes: any[]): void {
+function _fireBucket<S>(bucket: Set<Handler<S>>, value: S[keyof S], changes: Change[]): void {
   if (bucket.size === 0) return
   if (bucket.size === 1) {
     for (const h of bucket) {
@@ -38,7 +76,7 @@ function _fireBucket(bucket: Set<Handler>, value: any, changes: any[]): void {
       return
     }
   }
-  const snapshot: Handler[] = []
+  const snapshot: Handler<S>[] = []
   for (const h of bucket) snapshot.push(h)
   for (let i = 0; i < snapshot.length; i++) {
     try {
@@ -49,29 +87,33 @@ function _fireBucket(bucket: Set<Handler>, value: any, changes: any[]): void {
   }
 }
 
-function _flush(state: LeanState): void {
+function _flush<S>(state: LeanState<S>): void {
   state.scheduled = false
   const pending = state.pending
   if (!pending || pending.size === 0) return
   state.pending = undefined
-  let all: any[] | null = null
-  for (const [prop, changes] of pending) {
+  let all: Change[] | null = null
+  for (const entry of pending) {
+    const prop = entry[0]
+    const changes = entry[1]
     if (state.rootObservers || state.derived) {
       all ??= []
       for (let i = 0; i < changes.length; i++) all.push(changes[i])
     }
     const bucket = state.observers?.get(prop)
-    if (bucket) _fireBucket(bucket, state.proxy[prop], changes)
+    if (bucket) _fireBucket(bucket, (state.proxy as S)[prop as keyof S], changes)
   }
   if (all && state.rootObservers) {
-    _fireBucket(state.rootObservers, state.proxy, all)
+    _fireBucket(state.rootObservers, state.proxy as S[keyof S], all)
   }
   if (all && state.derived) {
-    for (const [prop, bucket] of state.derived) {
+    for (const entry of state.derived) {
+      const prop = entry[0]
+      const bucket = entry[1]
       if (bucket.size === 0) continue
-      let value
+      let value: S[keyof S]
       try {
-        value = state.proxy[prop]
+        value = (state.proxy as S)[prop as keyof S]
       } catch {
         continue
       }
@@ -80,7 +122,7 @@ function _flush(state: LeanState): void {
   }
 }
 
-function _hasQueuedConsumers(state: LeanState, prop: string): boolean {
+function _hasQueuedConsumers<S>(state: LeanState<S>, prop: string): boolean {
   const bucket = state.observers?.get(prop)
   return !!(
     (bucket && bucket.size > 0) ||
@@ -89,10 +131,10 @@ function _hasQueuedConsumers(state: LeanState, prop: string): boolean {
   )
 }
 
-function _queue(state: LeanState, prop: string, change: any = {}): void {
+function _queue<S>(state: LeanState<S>, prop: string, change: Partial<Change> = {}): void {
   if (!state.ready) return
   if (!_hasQueuedConsumers(state, prop)) return
-  const rec = { prop, pathParts: [prop], type: 'update', target: state.proxy, ...change }
+  const rec: Change = { prop, pathParts: [prop], type: 'update', target: state.proxy, ...change }
   const pending = state.pending ?? (state.pending = new Map())
   const arr = pending.get(prop)
   if (arr) arr.push(rec)
@@ -103,25 +145,40 @@ function _queue(state: LeanState, prop: string, change: any = {}): void {
   }
 }
 
-function _wrap(state: LeanState, target: any, rootProp: string): any {
+/**
+ * Nested nested-object/array traversal INSIDE one of `S`'s own fields (e.g.
+ * `store.list[0].name`): once inside a field's own substructure, the shape
+ * is no longer described by `S` (a field's element/property types aren't
+ * modeled recursively here) — `V` is a genuinely open per-call type at this
+ * depth, kept as a type parameter rather than `any` so it's at least
+ * threaded through instead of erased, but this is the one spot in this file
+ * that's honestly a dynamic-JS-object-graph boundary: how deep a nested
+ * value's shape goes isn't knowable without walking `S` structurally.
+ */
+function _wrap<S, V>(state: LeanState<S>, target: V, rootProp: string): V {
   if (!_plain(target)) return target
-  let perTarget = _nested.get(target)
+  const targetObj = target as unknown as Record<PropertyKey, unknown>
+  let perTarget: Map<string, unknown> | undefined = (targetObj as unknown as Record<symbol, Map<string, unknown>>)[
+    _NESTED
+  ]
   if (perTarget) {
     const cached = perTarget.get(rootProp)
-    if (cached) return cached
+    if (cached) return cached as V
   }
-  const proxy = new Proxy(target, {
+  const proxy = new Proxy(targetObj, {
     get(obj, prop) {
       if (prop === GEA_PROXY_RAW) return obj
-      if (typeof prop === 'symbol') return obj[prop as any]
-      trackRead(state.proxy, rootProp)
-      const value = obj[prop as any]
-      if (_isArr(obj) && typeof value === 'function') {
+      if (typeof prop === 'symbol') return obj[prop]
+      trackRead(state.proxy as object, rootProp)
+      const value = obj[prop]
+      if (Array.isArray(obj) && typeof value === 'function') {
         if (prop === 'push') {
-          return (...items: any[]) => {
-            const start = obj.length
+          return (...items: unknown[]) => {
+            const start = (obj as unknown[]).length
             const result = Array.prototype.push.apply(obj, items.map(_raw))
-            if (obj.length > start) _queue(state, rootProp, { type: 'append', start, count: obj.length - start })
+            if ((obj as unknown[]).length > start) {
+              _queue(state, rootProp, { type: 'append', start, count: (obj as unknown[]).length - start })
+            }
             return result
           }
         }
@@ -130,102 +187,128 @@ function _wrap(state: LeanState, target: any, rootProp: string): any {
     },
     set(obj, prop, value) {
       if (typeof prop === 'symbol') {
-        obj[prop as any] = value
+        obj[prop] = value
         return true
       }
       value = _raw(value)
-      const old = obj[prop as any]
+      const old = obj[prop]
       if (old === value) return true
-      obj[prop as any] = value
-      if (_isArr(obj)) {
-        if (value && typeof value === 'object') value[GEA_DIRTY] = true
+      obj[prop] = value
+      if (Array.isArray(obj)) {
+        if (value && typeof value === 'object') (value as Record<symbol, unknown>)[GEA_DIRTY] = true
         const idx = +prop
         if (Number.isInteger(idx)) {
           _queue(state, rootProp, { aipu: true, arix: idx, previousValue: old, newValue: value })
           return true
         }
       } else {
-        obj[GEA_DIRTY] = true
-        ;(obj[GEA_DIRTY_PROPS] ??= new Set()).add(prop)
+        ;(obj as Record<symbol, unknown>)[GEA_DIRTY] = true
+        const dirtyProps = ((obj as Record<symbol, unknown>)[GEA_DIRTY_PROPS] ??= new Set()) as Set<string>
+        dirtyProps.add(prop)
       }
       _queue(state, rootProp, { previousValue: old, newValue: value })
       return true
     },
     deleteProperty(obj, prop) {
       if (typeof prop === 'symbol') {
-        delete obj[prop as any]
+        delete obj[prop]
         return true
       }
-      const old = obj[prop as any]
-      delete obj[prop as any]
-      if (!_isArr(obj)) obj[GEA_DIRTY] = true
+      const old = obj[prop]
+      delete obj[prop]
+      if (!Array.isArray(obj)) (obj as Record<symbol, unknown>)[GEA_DIRTY] = true
       _queue(state, rootProp, { previousValue: old, type: 'delete' })
       return true
     },
   })
   if (!perTarget) {
     perTarget = new Map()
-    _nested.set(target, perTarget)
+    _hidden(targetObj, _NESTED, perTarget)
   }
   perTarget.set(rootProp, proxy)
-  return proxy
+  return proxy as V
 }
 
-export function createLeanProxy<T extends object>(raw: T): T {
-  const state: LeanState = {}
-  _priv.set(raw, state)
+export function createLeanProxy<S extends object>(raw: S): S {
+  const state: LeanState<S> = {}
+  _hidden(raw, _PRIV, state)
+  // The trap parameters are spelled out rather than left to `ProxyHandler<T>`'s
+  // contextual typing. geatsc plans a parameter from its OWN declaration, so an
+  // unannotated trap formal seals no carrier at all (`representation-plan
+  // coverage gap for Parameter`) even though the checker knows the contextual
+  // type. `receiver` is `object`, not `any`/`unknown` — per the Proxy spec it's
+  // always the object the property access was initiated on (the proxy itself,
+  // or a subclass instance), never a primitive. `prop`/`value` stay as the
+  // genuinely dynamic boundary (whatever the app read or wrote); those are
+  // narrowed before use below.
   const proxy = new Proxy(raw, {
-    get(target, prop, receiver) {
+    get(target: S, prop: string | symbol, receiver: object) {
       if (prop === GEA_PROXY_RAW) return target
-      if (typeof prop === 'symbol') return (target as any)[prop]
+      if (typeof prop === 'symbol') return (target as Record<symbol, unknown>)[prop]
       trackRead(receiver ?? target, prop)
-      const value = (target as any)[prop]
-      if (typeof value === 'function') return value.bind(receiver)
+      const value = target[prop as keyof S]
+      if (typeof value === 'function') return (value as (...args: unknown[]) => unknown).bind(receiver)
       return _plain(value) ? _wrap(state, value, prop) : value
     },
-    set(target, prop, value) {
+    set(target: S, prop: string | symbol, value: unknown) {
       if (typeof prop === 'symbol') {
-        ;(target as any)[prop] = value
+        ;(target as Record<symbol, unknown>)[prop] = value
         return true
       }
       value = _raw(value)
-      if (_isArr(value)) value = value.map(_raw)
-      const old = (target as any)[prop]
+      if (Array.isArray(value)) value = value.map(_raw)
+      const old = target[prop as keyof S]
       if (old === value && prop in target) return true
-      if (old && typeof old === 'object') _nested.delete(old)
-      ;(target as any)[prop] = value
+      if (old && typeof old === 'object') delete (old as Record<symbol, unknown>)[_NESTED]
+      ;(target as Record<string, unknown>)[prop] = value
       const direct = state.direct?.get(prop)
-      if (direct) for (const h of direct) h(value)
+      if (direct) for (const h of direct) h(value as S[keyof S])
       _queue(state, prop, { previousValue: old, newValue: value })
       return true
     },
   })
   state.proxy = proxy
-  _priv.set(proxy, state)
-  return proxy as T
+  _hidden(proxy, _PRIV, state)
+  return proxy
 }
 
-export function leanObserve(self: any, pathOrProp: string | readonly string[], handler: Handler): () => void {
-  const state = _priv.get(self)
+export function leanObserve<S>(
+  self: S | null | undefined,
+  pathOrProp: string | readonly string[],
+  handler: Handler<S>,
+): () => void {
+  const state: LeanState<S> | undefined = self == null ? undefined : (self as Record<symbol, LeanState<S>>)[_PRIV]
   if (!state) return () => {}
   state.ready = true
   const isArr = Array.isArray(pathOrProp)
-  if ((isArr && pathOrProp.length === 0) || pathOrProp === '') {
+  // `path` / `text` carry the two alternatives in their own exact slots so
+  // `.length` / `[0]` / `.slice` have a `readonly string[]` receiver: called on
+  // `pathOrProp` — declared `string | readonly string[]` — the intrinsic has no
+  // single receiver carrier and `pathOrProp.slice(1)` fail-closed with
+  // `representation-plan coverage gap for CallExpression`. Each read is already
+  // guarded by `isArr`, so neither default is ever observed.
+  let path: readonly string[] = []
+  let text = ''
+  if (typeof pathOrProp === 'string') text = pathOrProp
+  else path = pathOrProp
+  if ((isArr && path.length === 0) || (!isArr && text === '')) {
     const bucket = state.rootObservers ?? (state.rootObservers = new Set())
     bucket.add(handler)
-    return () => bucket.delete(handler)
+    return () => {
+      bucket.delete(handler)
+    }
   }
-  const prop = isArr ? pathOrProp[0] : pathOrProp
+  const prop = isArr ? (path[0] ?? '') : text
   if (!prop) return () => {}
-  const tail = isArr && pathOrProp.length > 1 ? pathOrProp.slice(1) : null
-  const finalHandler: Handler = tail
+  const tail = isArr && path.length > 1 ? path.slice(1) : null
+  const finalHandler: Handler<S> = tail
     ? (value, changes) => {
-        let next = value
+        let next: unknown = value
         for (let i = 0; i < tail.length; i++) {
           if (next == null) return
-          next = next[tail[i]]
+          next = (next as Record<string, unknown>)[tail[i]]
         }
-        handler(next, changes)
+        handler(next as S[keyof S], changes)
       }
     : handler
   const target = Object.prototype.hasOwnProperty.call(_raw(self), prop)
@@ -234,31 +317,39 @@ export function leanObserve(self: any, pathOrProp: string | readonly string[], h
   let bucket = target.get(prop)
   if (!bucket) target.set(prop, (bucket = new Set()))
   bucket.add(finalHandler)
-  return () => bucket!.delete(finalHandler)
+  return () => {
+    bucket!.delete(finalHandler)
+  }
 }
 
-export function leanObserveDirect(self: any, prop: string, handler: (value: any) => void): () => void {
-  const state = _priv.get(self)
+export function leanObserveDirect<S>(
+  self: S | null | undefined,
+  prop: string,
+  handler: (value: S[keyof S]) => void,
+): () => void {
+  const state: LeanState<S> | undefined = self == null ? undefined : (self as Record<symbol, LeanState<S>>)[_PRIV]
   if (!state) return () => {}
   state.ready = true
   const direct = state.direct ?? (state.direct = new Map())
   let bucket = direct.get(prop)
   if (!bucket) direct.set(prop, (bucket = new Set()))
   bucket.add(handler)
-  return () => bucket!.delete(handler)
+  return () => {
+    bucket!.delete(handler)
+  }
 }
 
-export class CompiledLeanStore {
+export class CompiledLeanStore<S extends Record<string, any> = Record<string, any>> {
   constructor() {
-    return createLeanProxy(this)
+    return createLeanProxy(this as unknown as S) as unknown as this
   }
 
-  observe(pathOrProp: string | readonly string[], handler: Handler): () => void {
-    return leanObserve(this, pathOrProp, handler)
+  observe(pathOrProp: string | readonly string[], handler: Handler<S>): () => void {
+    return leanObserve(this as unknown as S, pathOrProp, handler)
   }
 
-  [GEA_OBSERVE_DIRECT](prop: string, handler: (value: any) => void): () => void {
-    return leanObserveDirect(this, prop, handler)
+  [GEA_OBSERVE_DIRECT](prop: string, handler: (value: S[keyof S]) => void): () => void {
+    return leanObserveDirect(this as unknown as S, prop, handler)
   }
 }
 

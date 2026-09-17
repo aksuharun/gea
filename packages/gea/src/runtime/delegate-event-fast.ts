@@ -1,12 +1,8 @@
 import type { Disposer } from './disposer'
 
-const _NON_BUBBLING: Record<string, true> = {
-  blur: true,
-  focus: true,
-  mouseenter: true,
-  mouseleave: true,
-  scroll: true,
-}
+// A Set keeps the membership test native under geatsc; a Record<string, true>
+// computed access has no native plan and trips the boxed-equality guard.
+const _NON_BUBBLING = new Set<string>(['blur', 'focus', 'mouseenter', 'mouseleave', 'scroll'])
 
 type Handler = (e: Event) => void
 type HandlerPair = [Element, Handler]
@@ -28,7 +24,7 @@ export function delegateEventFast(root: Element, type: string, pairs: HandlerPai
           }
         }
       },
-      _NON_BUBBLING[type] === true,
+      _NON_BUBBLING.has(type),
     )
   }
   for (let i = 0; i < pairs.length; i++) {

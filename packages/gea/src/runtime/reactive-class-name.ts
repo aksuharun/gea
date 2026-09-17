@@ -1,12 +1,12 @@
 import type { Disposer } from './disposer'
 import { bind } from './bind'
 
-export const reactiveClassName = (
+export function reactiveClassName(
   el: Element,
   d: Disposer,
-  root: any,
+  root: object,
   pathOrGetter: readonly string[] | (() => unknown),
-): void => {
+): void {
   let prev: string | undefined
   bind(d, root, pathOrGetter, (v) => {
     const next = v == null || v === false ? '' : String(v)

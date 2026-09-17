@@ -3,13 +3,29 @@ import type { Disposer } from './disposer'
 type Handler = (e: Event) => void
 type HandlerPair = [Element, Handler]
 
+// Computed key, exactly as in `delegate-event-fast`. A literal `.__gc` expando
+// makes geatsc collect an anonymous record whose field is callable, which it has
+// no representation for ("Anonymous record expando __gc has no Representation
+// for Handler"). Reading and writing through a computed key keeps the property
+// dynamic, so no record shape is inferred for the host Element. `_GDC` (the
+// once-per-document delegate-installed flag) follows the same rule for the
+// same reason — a literal `.__gdc` would pin an anonymous record on Document.
+const _GC = '__' + 'gc'
+const _GDC = '__' + 'gdc'
+
+// The per-node handler stash and the per-document flag are dynamic expandos on
+// host objects; `Record<string, ...>` through the computed key is the same
+// sanctioned spelling `compiled-lean-store.ts` uses for its symbol stashes.
+type HandlerStash = Record<string, Handler | undefined>
+type FlagStash = Record<string, number | undefined>
+
 export function ensureClickDelegate(root: Element): void {
-  const rt: any = typeof document !== 'undefined' ? document : root.ownerDocument
-  if (!rt.__gdc) {
-    rt.__gdc = 1
+  const rt: Document = typeof document !== 'undefined' ? document : (root.ownerDocument as Document)
+  if (!(rt as unknown as FlagStash)[_GDC]) {
+    ;(rt as unknown as FlagStash)[_GDC] = 1
     rt.addEventListener('click', (e: Event) => {
       for (let n: Node | null = e.target as Node | null; n && n !== rt; n = n.parentNode) {
-        const h = (n as any).__gc as Handler | undefined
+        const h = (n as unknown as HandlerStash)[_GC]
         if (h !== undefined) {
           h(e)
           return
@@ -19,10 +35,28 @@ export function ensureClickDelegate(root: Element): void {
   }
 }
 
-export function delegateClick(root: Element, pairs: HandlerPair[], _disposer?: Disposer): void {
+export function delegateClick(root: Element, pairs: HandlerPair[], disposer?: Disposer): void {
   ensureClickDelegate(root)
   for (let i = 0; i < pairs.length; i++) {
     const el = pairs[i][0]
-    if (el) (el as any).__gc = pairs[i][1]
+    if (el) (el as unknown as HandlerStash)[_GC] = pairs[i][1]
+  }
+  // Disposer-contained storage: one registration per call (not per pair), so
+  // the live-path cost stays a single push. The `noop` check runs here, not
+  // inside `add`, so the noop fast path (keyed-list rows with no cleanup)
+  // allocates nothing — not even the teardown closure. Clearing on dispose
+  // bounds every stashed handler's lifetime to the owning component: the
+  // handlers capture the component's `this`, and under refcounted ownership
+  // an uncleared stash would keep the component alive through its own DOM
+  // (component → element → handler → component).
+  if (disposer && !disposer.noop) disposer.add(_clearHandlers(pairs))
+}
+
+function _clearHandlers(pairs: HandlerPair[]): () => void {
+  return () => {
+    for (let i = 0; i < pairs.length; i++) {
+      const el = pairs[i][0]
+      if (el) (el as unknown as HandlerStash)[_GC] = undefined
+    }
   }
 }

@@ -2,10 +2,23 @@ import { GEA_CREATE_TEMPLATE, GEA_DOM_COMPONENT, GEA_ELEMENT, GEA_ON_PROP_CHANGE
 import { GEA_CREATED_CALLED, GEA_DISPOSER, GEA_SET_PROPS } from './internal-symbols'
 import { createDisposer, type Disposer } from './disposer'
 import { getComponentId } from './component-id'
+import type { Renderable } from './renderable'
 
-type PropThunks = Record<string, () => any>
-const GEA_COMPONENT_ID = Symbol()
-const GEA_LAST_PROP_VALUES = Symbol()
+/**
+ * One thunk per prop of `P`, each returning that prop's own type.
+ *
+ * Generic rather than a flat dictionary so a component's props keep their
+ * declared types all the way through `GEA_SET_PROPS` — the compiler emits one
+ * thunk per JSX attribute, so the mapping is exact at every instantiation.
+ *
+ * `children` is intersected in separately (not folded into the mapped part)
+ * because JSX always permits a childless invocation regardless of whether
+ * `P` declares a `children` field — the compiler attaches a children thunk
+ * whenever the call site has JSX children, independent of `P`'s own shape.
+ */
+type PropThunks<P> = { [K in keyof P]: () => P[K] } & { children?: () => Renderable }
+const GEA_COMPONENT_ID: unique symbol = Symbol()
+const GEA_LAST_PROP_VALUES: unique symbol = Symbol()
 
 export class CompiledComponent<P extends Record<string, any> = Record<string, any>> {
   rendered = false
@@ -13,26 +26,32 @@ export class CompiledComponent<P extends Record<string, any> = Record<string, an
 
   [GEA_ELEMENT] = null as HTMLElement | null;
   [GEA_DISPOSER] = createDisposer() as Disposer;
-  [GEA_CREATED_CALLED] = false
+  [GEA_CREATED_CALLED] = false;
+  [GEA_COMPONENT_ID]?: string;
+  [GEA_LAST_PROP_VALUES]?: Partial<P>;
+  [GEA_ON_PROP_CHANGE]?(key: string, next: unknown): void
 
   get id(): string {
-    return ((this as any)[GEA_COMPONENT_ID] ??= getComponentId())
+    return (this[GEA_COMPONENT_ID] ??= getComponentId())
   }
 
   set id(value: string) {
-    ;(this as any)[GEA_COMPONENT_ID] = value
+    this[GEA_COMPONENT_ID] = value
   }
 
   get el(): HTMLElement | null {
     return this[GEA_ELEMENT] ?? null
   }
 
-  [GEA_SET_PROPS](thunks: PropThunks): void {
+  [GEA_SET_PROPS](thunks: PropThunks<P>): void {
     const createdCalled = this[GEA_CREATED_CALLED]
-    const notifyPropChange = createdCalled ? (this as any)[GEA_ON_PROP_CHANGE] : undefined
-    const prevValues: Record<string, any> | undefined =
-      typeof notifyPropChange === 'function' ? (this as any)[GEA_LAST_PROP_VALUES] : undefined
-    const out: Record<string, any> = {}
+    const notifyPropChange = createdCalled ? this[GEA_ON_PROP_CHANGE] : undefined
+    const prevValues: Partial<P> | undefined =
+      typeof notifyPropChange === 'function' ? this[GEA_LAST_PROP_VALUES] : undefined
+    // `out` is `P` under construction — every key comes from `PropThunks<P>`
+    // (i.e. `keyof P`) and every getter yields `P[K]`, so `Partial<P>` is the
+    // exact in-progress type; the final `as P` merely asserts completion.
+    const out: Partial<P> = {}
     for (const k in thunks) {
       Object.defineProperty(out, k, {
         enumerable: true,
@@ -40,16 +59,17 @@ export class CompiledComponent<P extends Record<string, any> = Record<string, an
         get: () => thunks[k](),
       })
     }
-    if (typeof thunks.children === 'function') {
-      let cached: any = undefined
+    const childrenThunk = thunks.children
+    if (typeof childrenThunk === 'function') {
+      let cached: Renderable = undefined
       let cacheNode = false
       Object.defineProperty(out, 'children', {
         enumerable: true,
         configurable: true,
         get: () => {
           if (cacheNode) return cached
-          const v = thunks.children()
-          if (v && typeof v.nodeType === 'number') {
+          const v = childrenThunk()
+          if (v !== null && typeof v === 'object' && typeof (v as Node).nodeType === 'number') {
             cached = v
             cacheNode = true
           }
@@ -58,22 +78,22 @@ export class CompiledComponent<P extends Record<string, any> = Record<string, an
       })
     }
     this.props = out as P
-    const nextValues: Record<string, any> = {}
-    for (const key in thunks) nextValues[key] = this.props?.[key]
-    ;(this as any)[GEA_LAST_PROP_VALUES] = nextValues
+    const nextValues: Partial<P> = {}
+    for (const key in thunks) nextValues[key as keyof P] = this.props?.[key as keyof P]
+    this[GEA_LAST_PROP_VALUES] = nextValues
     if (!createdCalled) {
       this[GEA_CREATED_CALLED] = true
       if (this.created !== CompiledComponent.prototype.created) this.created(this.props)
     } else if (typeof notifyPropChange === 'function') {
       for (const key in thunks) {
-        const prev = prevValues?.[key]
-        const next = this.props?.[key]
+        const prev = prevValues?.[key as keyof P]
+        const next = this.props?.[key as keyof P]
         if (next !== prev || (prev !== null && typeof prev === 'object')) notifyPropChange.call(this, key, next)
       }
     }
   }
 
-  [GEA_CREATE_TEMPLATE](_disposer: Disposer): Node {
+  [GEA_CREATE_TEMPLATE](_disposer: Disposer): Renderable {
     return document.createDocumentFragment()
   }
 
@@ -82,29 +102,33 @@ export class CompiledComponent<P extends Record<string, any> = Record<string, an
       this[GEA_CREATED_CALLED] = true
       if (this.created !== CompiledComponent.prototype.created) this.created(this.props)
     }
-    let node = this[GEA_CREATE_TEMPLATE](this[GEA_DISPOSER])
+    let node: Renderable = this[GEA_CREATE_TEMPLATE](this[GEA_DISPOSER])
     if (node == null) node = document.createComment('')
-    if (typeof (node as any).nodeType !== 'number') {
-      if (Array.isArray(node)) {
-        const frag = document.createDocumentFragment()
-        for (const n of node) {
-          if (n == null) continue
-          if (typeof (n as any).nodeType === 'number') frag.appendChild(n as Node)
-          else frag.appendChild(document.createTextNode(String(n)))
-        }
-        node = frag
-      } else {
-        node = document.createTextNode(String(node))
+    if (Array.isArray(node)) {
+      const frag = document.createDocumentFragment()
+      for (const n of node) {
+        if (n == null) continue
+        if (n !== null && typeof n === 'object' && typeof (n as Node).nodeType === 'number') frag.appendChild(n as Node)
+        else frag.appendChild(document.createTextNode(String(n)))
       }
+      node = frag
+    } else if (!(node !== null && typeof node === 'object' && typeof (node as Node).nodeType === 'number')) {
+      node = document.createTextNode(String(node))
     }
-    parent.appendChild(node)
-    if (node.nodeType === 11) {
+    // By this point `node` is always a genuine Node: either it already was one,
+    // or the branches above just replaced it with one (a fragment or a text
+    // node). TS's control-flow analysis can't carry that invariant through the
+    // `Array.isArray` / `typeof` chain above, so state it once here instead of
+    // re-asserting `as Node` at every remaining use.
+    const domNode = node as Node
+    parent.appendChild(domNode)
+    if (domNode.nodeType === 11) {
       this[GEA_ELEMENT] = ((parent as Element).lastElementChild as HTMLElement | null) ?? null
-    } else if (node.nodeType === 1) {
-      this[GEA_ELEMENT] = node as HTMLElement
+    } else if (domNode.nodeType === 1) {
+      this[GEA_ELEMENT] = domNode as HTMLElement
     }
-    const el = this[GEA_ELEMENT] as any
-    if (el) el[GEA_DOM_COMPONENT] = this
+    const el = this[GEA_ELEMENT]
+    if (el) (el as HTMLElement & { [GEA_DOM_COMPONENT]?: unknown })[GEA_DOM_COMPONENT] = this
     this.rendered = true
     this.onAfterRender()
   }

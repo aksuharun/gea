@@ -3,12 +3,12 @@ import { bind } from './bind'
 
 type InputLike = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
 
-export const reactiveValueRead = (
+export function reactiveValueRead(
   el: InputLike,
   d: Disposer,
   root: any,
   pathOrGetter: readonly string[] | (() => unknown),
-): void => {
+): void {
   let controlled = false
   const apply = (v: unknown): void => {
     if (v === undefined && !controlled) return
@@ -19,13 +19,13 @@ export const reactiveValueRead = (
   bind(d, root, pathOrGetter, apply)
 }
 
-export const reactiveValue = (
+export function reactiveValue(
   el: InputLike,
   d: Disposer,
   root: any,
   pathOrGetter: readonly string[] | (() => unknown),
   writeBack?: (v: string) => void,
-): void => {
+): void {
   reactiveValueRead(el, d, root, pathOrGetter)
   if (writeBack) {
     const onInput = (): void => {

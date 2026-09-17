@@ -26,7 +26,7 @@ export function conditional(
   parent: Node,
   anchor: Comment,
   disposer: Disposer,
-  root: any,
+  root: object,
   cond: () => boolean,
   mkTrue: BranchFactory,
   mkFalse?: BranchFactory,

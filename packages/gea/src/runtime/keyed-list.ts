@@ -39,49 +39,75 @@ import { _consumeClaim, _defer, _deferBulk, _markClaimable, _trackLive } from '.
 import { GEA_DOM_ITEM, GEA_DOM_KEY } from './keyed-list-symbols'
 
 /** Unwrap a proxy value to its raw target. */
-const unwrap = (v: any): any => (v && typeof v === 'object' && v[GEA_PROXY_RAW]) || v
+// A top-level FUNCTION DECLARATION, not a `const` holding an arrow: an
+// unannotated module-scope callable const has no sealed binding subject
+// under geatsc (`representation-plan coverage gap for
+// VariableDeclaration`) because its `any -> any` signature admits no exact
+// ABI. A function declaration is its own emitted callable and needs no
+// value carrier. Body is unchanged.
+function unwrap<V>(v: V): V {
+  const rawTarget = v && typeof v === 'object' && (v as Record<symbol, unknown>)[GEA_PROXY_RAW]
+  return (rawTarget as V) || v
+}
 
 export { GEA_DOM_ITEM, GEA_DOM_KEY } from './keyed-list-symbols'
 
 export type { Entry, ItemObservable } from './keyed-list/types'
 
-export interface KeyedListConfig {
+/**
+ * `T` is the list item's type — knowable at each `.map()` call site (the
+ * compiler emits one `keyedList()` invocation per site, closed over the
+ * source array's real element type). `root` stays a structural `any`: it's
+ * whatever object `path`/getter reads through (a component instance, a
+ * nested store, ...), and — unlike the item — resolving it further would
+ * need the same path-typed machinery `subscribe()` documents as a genuine
+ * dynamic boundary.
+ */
+export interface KeyedListConfig<T> {
   container: Element
   anchor: Comment
   disposer: Disposer
   root: any
   /**
-   * Per-site rescue queue. The compiler emits one `Map<string, Entry>` literal
-   * per `.map()` site at module scope and threads it through here so two
-   * unrelated sites can't collide. Optional for hand-written callers (a fresh
-   * map is allocated when omitted, disabling cross-render rescue but keeping
-   * the disposer microtask intact).
+   * Per-site rescue queue. The compiler emits one `Map<string, Entry<T>>`
+   * literal per `.map()` site at module scope and threads it through here so
+   * two unrelated sites can't collide. Optional for hand-written callers (a
+   * fresh map is allocated when omitted, disabling cross-render rescue but
+   * keeping the disposer microtask intact).
    */
-  pending?: Map<string, Entry>
+  pending?: Map<string, Entry<T>>
   /** Either a static path on `root` (`['items']`) OR a getter returning the array. */
-  path: readonly string[] | (() => any[])
-  key: (item: any, idx: number) => string
+  path: readonly string[] | (() => T[])
+  key: (item: T, idx: number) => string
   /** Compiler-specialized: create a new entry for this item at index `idx`. */
-  createEntry: (item: any, idx: number) => Entry
+  createEntry: (item: T, idx: number) => Entry<T>
   /** Compiler-specialized: apply a new item identity to an existing entry. */
-  patchEntry: (e: Entry, newItem: any, newIdx: number) => void
+  patchEntry: (e: Entry<T>, newItem: T, newIdx: number) => void
   /** Optional: user-level cleanup on row removal (relational-class map delete). */
-  onItemRemove?: (e: Entry) => void
+  onItemRemove?: (e: Entry<T>) => void
   /** Optional: gives relational-class setup access to the kernel's byKey Map. */
-  onByKeyCreated?: (byKey: Map<string, Entry>) => void
+  onByKeyCreated?: (byKey: Map<string, Entry<T>>) => void
 }
 
-export function keyedList(cfg: KeyedListConfig): void {
-  const { container, anchor, disposer, root, path, key: keyFn, createEntry, patchEntry, onItemRemove } = cfg
-  const pending: Map<string, Entry> = cfg.pending ?? new Map()
+export function keyedList<T>(cfg: KeyedListConfig<T>): void {
+  const container = cfg.container
+  const anchor = cfg.anchor
+  const disposer = cfg.disposer
+  const root = cfg.root
+  const path = cfg.path
+  const keyFn = cfg.key
+  const createEntry = cfg.createEntry
+  const patchEntry = cfg.patchEntry
+  const onItemRemove = cfg.onItemRemove
+  const pending: Map<string, Entry<T>> = cfg.pending ?? new Map()
 
-  let entries: Entry[] = []
-  const byKey = new Map<string, Entry>()
+  let entries: Entry<T>[] = []
+  const byKey = new Map<string, Entry<T>>()
   if (cfg.onByKeyCreated) cfg.onByKeyCreated(byKey)
 
-  const resolveArr = (): any[] => {
+  const resolveArr = (): T[] => {
     if (typeof path === 'function') {
-      const v = (path as () => any[])()
+      const v = (path as () => T[])()
       return Array.isArray(v) ? v : []
     }
     let v: any = root
@@ -92,7 +118,7 @@ export function keyedList(cfg: KeyedListConfig): void {
     return Array.isArray(v) ? v : []
   }
 
-  const removeEntry = (e: Entry): void => {
+  const removeEntry = (e: Entry<T>): void => {
     if (onItemRemove) onItemRemove(e)
     byKey.delete(e.key)
     if (_consumeClaim(e)) return
@@ -100,9 +126,9 @@ export function keyedList(cfg: KeyedListConfig): void {
     _defer(pending, e)
   }
 
-  const markEntriesLeaving = (next: any[]): void => {
+  const markEntriesLeaving = (next: T[]): void => {
     if (entries.length === 0) return
-    const nextByKey = new Map<string, Set<any>>()
+    const nextByKey = new Map<string, Set<T>>()
     for (let i = 0; i < next.length; i++) {
       const k = keyFn(next[i], i)
       let bucket = nextByKey.get(k)
@@ -134,9 +160,9 @@ export function keyedList(cfg: KeyedListConfig): void {
     container.insertBefore(frag, anchor)
   }
 
-  let prevArrRef: any = firstArr
+  let prevArrRef: T[] = firstArr
 
-  const patchDirtyItems = (arr: any[]): boolean => {
+  const patchDirtyItems = (arr: T[]): boolean => {
     let patched = false
     const raw = (arr as any)[GEA_PROXY_RAW] || arr
     for (let i = 0; i < raw.length; i++) {
@@ -153,7 +179,7 @@ export function keyedList(cfg: KeyedListConfig): void {
   }
 
   // ── Reconciliation ────────────────────────────────────────────────────
-  const reconcile = (arr: any[], changes?: Change[]): void => {
+  const reconcile = (arr: T[], changes?: Change[]): void => {
     // Same array ref + same length → structural no-op. Dirty-bit scan
     // picks up in-place item writes.
     if (arr === prevArrRef && entries.length === arr.length) {
@@ -194,7 +220,7 @@ export function keyedList(cfg: KeyedListConfig): void {
         }
       }
       // aipu-only 2-swap: items[i]↔items[j] via two symmetric aipu records.
-      if (aipuOnly && changes!.length === 2) {
+      if (aipuOnly && changes!.length > 1 && changes!.length < 3) {
         const a = changes![0].arix as number
         const b = changes![1].arix as number
         if (a >= 0 && b >= 0 && a < entries.length && b < entries.length && a !== b) {
@@ -282,7 +308,7 @@ export function keyedList(cfg: KeyedListConfig): void {
         totalRemoved += (c.count as number) || 0
       }
       if (onlyRemoves && entries.length - arr.length === totalRemoved) {
-        if (changes.length === 1 && (changes[0].count as number) === 1) {
+        if (changes.length < 2 && (changes[0].count as number) === 1) {
           const idx = changes[0].start as number
           if (idx >= 0 && idx < entries.length) {
             removeEntry(entries[idx])
@@ -316,7 +342,7 @@ export function keyedList(cfg: KeyedListConfig): void {
 
     // Fresh-create fast path (09_clear1k_x8 per-cycle).
     if (oldLen === 0 && newLen > 0) {
-      const freshEntries: Entry[] = new Array(newLen)
+      const freshEntries: Entry<T>[] = new Array(newLen)
       const frag = container.ownerDocument!.createDocumentFragment()
       for (let i = 0; i < newLen; i++) {
         const e = createEntry(arr[i], i)
@@ -400,7 +426,7 @@ export function keyedList(cfg: KeyedListConfig): void {
           _deferBulk(pending, entries)
         }
         byKey.clear()
-        const newEntries: Entry[] = new Array(newLen)
+        const newEntries: Entry<T>[] = new Array(newLen)
         const newEls: Node[] = new Array(newLen + 1)
         for (let i = 0; i < newLen; i++) {
           const e = createEntry(arr[i], i)
@@ -438,11 +464,11 @@ export function keyedList(cfg: KeyedListConfig): void {
 
     const stable = new Set(lis(newToOld))
 
-    const next: Entry[] = new Array(newLen)
+    const next: Entry<T>[] = new Array(newLen)
     let nextRef: Node = anchor
     for (let i = newLen - 1; i >= 0; i--) {
       const oldIdx = newToOld[i]
-      let e: Entry
+      let e: Entry<T>
       if (oldIdx === -1) {
         e = createEntry(arr[i], i)
         byKey.set(e.key, e)
@@ -465,8 +491,8 @@ export function keyedList(cfg: KeyedListConfig): void {
   // ── Subscribe for array updates ──────────────────────────────────────
   if (typeof path === 'function') {
     withTracking(disposer, root, () => {
-      const arr = (path as () => any[])()
-      const next = Array.isArray(arr) ? arr : []
+      const arr = (path as () => T[])()
+      const next: T[] = Array.isArray(arr) ? arr : []
       markEntriesLeaving(next)
       queueMicrotask(() => reconcile(next))
     })

@@ -20,28 +20,37 @@
 import type { Disposer } from './disposer'
 import { subscribe } from './subscribe'
 
-interface Dep {
-  root: any
-  prop: string
-}
-interface Scope {
-  deps: Dep[]
-}
-let _active: Scope | null = null
+// The active scope is two parallel module-level arrays, not a `Scope` record
+// holding a `Dep[]`. Under geatsc an `any`-typed array is
+// `vector:inline-value<undefined>`, which has no physical storage as a RECORD
+// FIELD ("Frozen vector:inline-value<undefined> has no physical storage
+// materialization in finite-aggregate") — as a plain local or module binding it
+// is fine. Keeping the arrays out of any record shape sidesteps that entirely,
+// and the pairs, the linear dedup and the save/restore nesting are unchanged.
+//
+// `object` rather than `any`/`unknown`: every root pushed here is a real
+// store/component reference from a proxy trap (`store.ts`'s `rootGetValue`,
+// `compiled-store.ts`'s `get` trap, ...) — never a primitive — so `object` is
+// the honest type. Nothing here needs to know WHICH object; identity
+// (`===`) is the only operation performed on these entries.
+let _activeRoots: object[] | null = null
+let _activeProps: string[] | null = null
 let _recursing = false
 
 /** Record a tracking read. Called by store.ts proxy traps. */
-export function trackRead(storeRoot: any, prop: string | symbol): void {
-  if (!_active || _recursing) return
+export function trackRead(storeRoot: object, prop: string | symbol): void {
+  if (!_activeRoots || !_activeProps || _recursing) return
   if (typeof prop !== 'string') return
   _recursing = true
   try {
     // Linear dedup — 1-3 deps is typical per binding, a Map is overkill.
-    const deps = _active.deps
-    for (let i = 0; i < deps.length; i++) {
-      if (deps[i].root === storeRoot && deps[i].prop === prop) return
+    const roots = _activeRoots
+    const props = _activeProps
+    for (let i = 0; i < roots.length; i++) {
+      if (roots[i] === storeRoot && props[i] === prop) return
     }
-    deps.push({ root: storeRoot, prop })
+    roots.push(storeRoot)
+    props.push(prop)
   } finally {
     _recursing = false
   }
@@ -54,31 +63,36 @@ export function trackPath(_path: readonly string[]): void {
 
 /** Suppress tracking for `fn`. */
 export function untrack<T>(fn: () => T): T {
-  const prev = _active
-  _active = null
+  const prevRoots = _activeRoots
+  const prevProps = _activeProps
+  _activeRoots = null
+  _activeProps = null
   try {
     return fn()
   } finally {
-    _active = prev
+    _activeRoots = prevRoots
+    _activeProps = prevProps
   }
   return undefined as T
 }
 
-function _depsEqual(a: Dep[], b: Dep[]): boolean {
-  if (a.length !== b.length) return false
-  for (let i = 0; i < a.length; i++) {
-    if (a[i].root !== b[i].root || a[i].prop !== b[i].prop) return false
+function _depsEqual(aRoots: object[], aProps: string[], bRoots: object[], bProps: string[]): boolean {
+  if (aRoots.length !== bRoots.length) return false
+  for (let i = 0; i < aRoots.length; i++) {
+    if (aRoots[i] !== bRoots[i] || aProps[i] !== bProps[i]) return false
   }
   return true
 }
 
-export function withTracking(disposer: Disposer, root: any, fn: () => void, staticDeps = false): void {
+export function withTracking(disposer: Disposer, root: object, fn: () => void, staticDeps = false): void {
   let offs: Array<() => void> = []
-  let prevDeps: Dep[] = []
+  let prevRoots: object[] = []
+  let prevProps: string[] = []
   // Reused across the 2 pre-lock runs — saves a Scope + deps array alloc
   // each fire on 01_run1k / 07_create10k (6000 allocs for 1000 rows × 3
   // bindings × 2 runs).
-  const scope: Scope = { deps: [] }
+  let scopeRoots: object[] = []
+  let scopeProps: string[] = []
   // Stability counter: 0 = first run; 1 = one identical run; 2 = locked.
   // Locked effects skip tracking on every subsequent fire (same idea as the
   // compiled patcher's fast path). Require 2 identical runs before locking so
@@ -90,25 +104,30 @@ export function withTracking(disposer: Disposer, root: any, fn: () => void, stat
       fn()
       return
     }
-    const prev = _active
-    scope.deps = []
-    _active = scope
+    const prevRootsActive = _activeRoots
+    const prevPropsActive = _activeProps
+    scopeRoots = []
+    scopeProps = []
+    _activeRoots = scopeRoots
+    _activeProps = scopeProps
     try {
       fn()
     } finally {
-      _active = prev
-      const d2 = scope.deps
-      if (_depsEqual(d2, prevDeps)) {
+      _activeRoots = prevRootsActive
+      _activeProps = prevPropsActive
+      const roots2 = scopeRoots
+      const props2 = scopeProps
+      if (_depsEqual(roots2, props2, prevRoots, prevProps)) {
         stable = staticDeps ? 2 : stable + 1
       } else {
         stable = staticDeps ? 2 : 0
         for (let i = 0; i < offs.length; i++) offs[i]()
         offs = []
-        for (let i = 0; i < d2.length; i++) {
-          const d = d2[i]
-          offs.push(subscribe(d.root ?? root, [d.prop], run))
+        for (let i = 0; i < roots2.length; i++) {
+          offs.push(subscribe(roots2[i] ?? root, [props2[i]], run))
         }
-        prevDeps = d2
+        prevRoots = roots2
+        prevProps = props2
       }
     }
   }

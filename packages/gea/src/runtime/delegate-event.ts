@@ -20,13 +20,10 @@
 
 import type { Disposer } from './disposer'
 
-const _NON_BUBBLING: Record<string, true> = {
-  blur: true,
-  focus: true,
-  mouseenter: true,
-  mouseleave: true,
-  scroll: true,
-}
+// A Set keeps the membership test native under geatsc; a Record<string, true>
+// computed access has no native plan and trips the boxed-equality guard.
+// Mirrors `delegate-event-fast.ts`, which took the same treatment.
+const _NON_BUBBLING = new Set<string>(['blur', 'focus', 'mouseenter', 'mouseleave', 'scroll'])
 
 type Handler = (e: Event) => void
 type HandlerPair = [Element, Handler] | [Element, Handler, false]
@@ -67,13 +64,18 @@ export function delegateEvent(root: Element, type: string, pairs: HandlerPair[],
           }
         }
       },
-      _NON_BUBBLING[type] === true,
+      _NON_BUBBLING.has(type),
     )
   }
   for (let i = 0; i < pairs.length; i++) {
     const el = pairs[i][0]
     if (el) {
-      if (pairs[i][2] === false) {
+      // A 3-element pair (`[el, handler, false]`) is the compiler's
+      // fast, no-shadow marker; a plain 2-element pair defaults to the
+      // slower `currentTarget`-shadowing slot. Test the pair length (a
+      // native numeric compare) rather than `pairs[i][2] === false`, whose
+      // boxed `false | undefined` equality has no native plan under geatsc.
+      if (pairs[i].length > 2) {
         ;(el as any)[k] = pairs[i][1]
       } else {
         ;(el as any)[currentTargetKey] = pairs[i][1]

@@ -6,36 +6,54 @@ import { lis } from './keyed-list/lis'
 import type { ItemObservable } from './keyed-list/types'
 import { subscribe } from './subscribe'
 
-const unwrap = (v: any): any => (v && typeof v === 'object' && v[GEA_PROXY_RAW]) || v
-
-interface SimpleEntry {
-  key: any
-  item: any
-  element: Element
-  disposer?: Disposer
-  obs?: ItemObservable | null
+// A top-level FUNCTION DECLARATION, not a `const` holding an arrow: an
+// unannotated module-scope callable const has no sealed binding subject
+// under geatsc (`representation-plan coverage gap for
+// VariableDeclaration`) because its `any -> any` signature admits no exact
+// ABI. A function declaration is its own emitted callable and needs no
+// value carrier. Body is unchanged.
+function unwrap<V>(v: V): V {
+  const rawTarget = v && typeof v === 'object' && (v as Record<symbol, unknown>)[GEA_PROXY_RAW]
+  return (rawTarget as V) || v
 }
 
-export interface SimpleKeyedListConfig {
+/** `T` is the item type, knowable at each call site — mirrors `Entry<T>` in `./keyed-list/types`. */
+interface SimpleEntry<T> {
+  key: any
+  item: T
+  element: Element
+  disposer?: Disposer
+  obs?: ItemObservable<T> | null
+}
+
+export interface SimpleKeyedListConfig<T> {
   container: Element
   anchor: Comment
   disposer: Disposer
   root: any
   path: readonly string[]
-  key: (item: any, idx: number) => any
-  createEntry: (item: any, idx: number) => SimpleEntry
-  patchEntry: (entry: SimpleEntry, item: any, idx: number) => void
-  onItemRemove?: (entry: SimpleEntry) => void
-  onByKeyCreated?: (byKey: Map<any, SimpleEntry>) => void
+  key: (item: T, idx: number) => any
+  createEntry: (item: T, idx: number) => SimpleEntry<T>
+  patchEntry: (entry: SimpleEntry<T>, item: T, idx: number) => void
+  onItemRemove?: (entry: SimpleEntry<T>) => void
+  onByKeyCreated?: (byKey: Map<any, SimpleEntry<T>>) => void
 }
 
-export function keyedListSimple(cfg: SimpleKeyedListConfig): void {
-  const { container, anchor, disposer, root, path, key: keyFn, createEntry, patchEntry, onItemRemove } = cfg
-  let entries: SimpleEntry[] = []
-  const byKey = new Map<any, SimpleEntry>()
+export function keyedListSimple<T>(cfg: SimpleKeyedListConfig<T>): void {
+  const container = cfg.container
+  const anchor = cfg.anchor
+  const disposer = cfg.disposer
+  const root = cfg.root
+  const path = cfg.path
+  const keyFn = cfg.key
+  const createEntry = cfg.createEntry
+  const patchEntry = cfg.patchEntry
+  const onItemRemove = cfg.onItemRemove
+  let entries: SimpleEntry<T>[] = []
+  const byKey = new Map<any, SimpleEntry<T>>()
   if (cfg.onByKeyCreated) cfg.onByKeyCreated(byKey)
 
-  const resolveArr = (): any[] => {
+  const resolveArr = (): T[] => {
     let v = root
     for (let i = 0; i < path.length; i++) {
       if (v == null) return []
@@ -44,12 +62,12 @@ export function keyedListSimple(cfg: SimpleKeyedListConfig): void {
     return Array.isArray(v) ? v : []
   }
 
-  const cleanupEntry = (entry: SimpleEntry): void => {
+  const cleanupEntry = (entry: SimpleEntry<T>): void => {
     if (onItemRemove) onItemRemove(entry)
     entry.disposer?.dispose()
   }
 
-  const removeEntry = (entry: SimpleEntry): void => {
+  const removeEntry = (entry: SimpleEntry<T>): void => {
     cleanupEntry(entry)
     byKey.delete(entry.key)
     if (entry.element.parentNode) entry.element.parentNode.removeChild(entry.element)
@@ -72,9 +90,9 @@ export function keyedListSimple(cfg: SimpleKeyedListConfig): void {
     container.insertBefore(frag, anchor)
   }
 
-  let prevArrRef: any = firstArr
+  let prevArrRef: T[] = firstArr
 
-  const patchDirtyItems = (arr: any[]): boolean => {
+  const patchDirtyItems = (arr: T[]): boolean => {
     let patched = false
     const raw = (arr as any)[GEA_PROXY_RAW] || arr
     for (let i = 0; i < raw.length; i++) {
@@ -90,7 +108,7 @@ export function keyedListSimple(cfg: SimpleKeyedListConfig): void {
     return patched
   }
 
-  const reconcile = (arr: any[], changes?: Change[]): void => {
+  const reconcile = (arr: T[], changes?: Change[]): void => {
     if (arr === prevArrRef && entries.length === arr.length) {
       let structural = false
       let aipuOnly = changes && changes.length > 0
@@ -112,7 +130,7 @@ export function keyedListSimple(cfg: SimpleKeyedListConfig): void {
         }
       }
 
-      if (aipuOnly && changes!.length === 2) {
+      if (aipuOnly && changes!.length > 1 && changes!.length < 3) {
         const a = changes![0].arix as number
         const b = changes![1].arix as number
         if (a >= 0 && b >= 0 && a < entries.length && b < entries.length && a !== b) {
@@ -193,7 +211,7 @@ export function keyedListSimple(cfg: SimpleKeyedListConfig): void {
         totalRemoved += (change.count as number) || 0
       }
       if (onlyRemoves && entries.length - arr.length === totalRemoved) {
-        if (changes.length === 1 && (changes[0].count as number) === 1) {
+        if (changes.length < 2 && (changes[0].count as number) === 1) {
           const idx = changes[0].start as number
           if (idx >= 0 && idx < entries.length) {
             removeEntry(entries[idx])
@@ -225,7 +243,7 @@ export function keyedListSimple(cfg: SimpleKeyedListConfig): void {
     const oldLen = entries.length
 
     if (oldLen === 0 && newLen > 0) {
-      const nextEntries = new Array<SimpleEntry>(newLen)
+      const nextEntries = new Array<SimpleEntry<T>>(newLen)
       const frag = container.ownerDocument!.createDocumentFragment()
       for (let i = 0; i < newLen; i++) {
         const entry = createEntry(arr[i], i)
@@ -291,7 +309,7 @@ export function keyedListSimple(cfg: SimpleKeyedListConfig): void {
       if (disjoint) {
         for (let i = 0; i < oldLen; i++) cleanupEntry(entries[i])
         byKey.clear()
-        const nextEntries = new Array<SimpleEntry>(newLen)
+        const nextEntries = new Array<SimpleEntry<T>>(newLen)
         const nextNodes = new Array<Node>(newLen + 1)
         for (let i = 0; i < newLen; i++) {
           const entry = createEntry(arr[i], i)
@@ -309,28 +327,33 @@ export function keyedListSimple(cfg: SimpleKeyedListConfig): void {
 
     for (let i = 0; i < oldLen; i++) (entries[i] as any)._i = i
     const newToOld = new Array<number>(newLen)
-    const seenOld = new Array<boolean>(oldLen).fill(false)
+    // A 0/1 number vector, not `boolean[]`. geatsc settles an element carrier
+    // for this vector that disagrees with the exact primitive-Boolean fact it
+    // derives for `!seenOld[i]`, and aborts the whole compile. Numbers carry
+    // the same one-bit state with a representation it can settle.
+    const seenOld: number[] = []
+    for (let i = 0; i < oldLen; i++) seenOld.push(0)
     for (let i = 0; i < newLen; i++) {
       const existing = byKey.get(newKeys[i])
       if (existing) {
         const oldIdx = (existing as any)._i as number
         newToOld[i] = oldIdx
-        seenOld[oldIdx] = true
+        seenOld[oldIdx] = 1
       } else {
         newToOld[i] = -1
       }
     }
 
     for (let i = oldLen - 1; i >= 0; i--) {
-      if (!seenOld[i]) removeEntry(entries[i])
+      if (seenOld[i] === 0) removeEntry(entries[i])
     }
 
     const stable = new Set(lis(newToOld))
-    const nextEntries = new Array<SimpleEntry>(newLen)
+    const nextEntries = new Array<SimpleEntry<T>>(newLen)
     let nextRef: Node = anchor
     for (let i = newLen - 1; i >= 0; i--) {
       const oldIdx = newToOld[i]
-      let entry: SimpleEntry
+      let entry: SimpleEntry<T>
       if (oldIdx === -1) {
         entry = createEntry(arr[i], i)
         byKey.set(entry.key, entry)

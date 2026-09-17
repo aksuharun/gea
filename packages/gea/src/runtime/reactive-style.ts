@@ -1,14 +1,16 @@
 import type { Disposer } from './disposer'
 import { bind } from './bind'
 
-const kebab = (k: string): string => k.replace(/[A-Z]/g, (m) => '-' + m.toLowerCase())
+function kebab(k: string): string {
+  return k.replace(/[A-Z]/g, (m) => '-' + m.toLowerCase())
+}
 
-export const reactiveStyle = (
+export function reactiveStyle(
   el: Element,
   d: Disposer,
-  root: any,
+  root: object,
   pathOrGetter: readonly string[] | (() => unknown),
-): void => {
+): void {
   let prev: Record<string, string> = {}
   const style = (el as HTMLElement).style
   bind(d, root, pathOrGetter, (v) => {
@@ -31,13 +33,13 @@ export const reactiveStyle = (
 // `next`/`prev` record allocation, no runtime kebab-casing, and tracking is
 // per-property (only the property that actually changed re-applies). The generic
 // `reactiveStyle` above stays for dynamic/spread style objects.
-export const reactiveStyleProp = (
+export function reactiveStyleProp(
   el: Element,
   d: Disposer,
-  root: any,
+  root: object,
   prop: string,
   pathOrGetter: readonly string[] | (() => unknown),
-): void => {
+): void {
   const style = (el as HTMLElement).style
   let prev: string | undefined
   bind(d, root, pathOrGetter, (v) => {

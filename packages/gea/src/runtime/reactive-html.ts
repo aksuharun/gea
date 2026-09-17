@@ -13,12 +13,12 @@
 import type { Disposer } from './disposer'
 import { bind } from './bind'
 
-export const reactiveHtml = (
+export function reactiveHtml(
   el: Element,
   d: Disposer,
   root: any,
   pathOrGetter: readonly string[] | (() => unknown),
-): void => {
+): void {
   let prev: unknown = undefined
   bind(d, root, pathOrGetter, (v) => {
     if (v === prev) return

@@ -6,7 +6,7 @@ let uidProvider: (() => string | null) | null = null
 /** Optional provider for context-scoped UID reset (injected by SSR). */
 let resetProvider: ((seed: number) => boolean) | null = null
 
-const getUid = (): string => {
+function getUid(): string {
   if (uidProvider) {
     const id = uidProvider()
     if (id !== null) return id

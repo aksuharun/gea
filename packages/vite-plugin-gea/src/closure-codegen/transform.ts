@@ -3,7 +3,7 @@
  */
 
 import { parse } from '@babel/parser'
-import type { ClassDeclaration, File } from '@babel/types'
+import type { ClassDeclaration, File, TSTypeLiteral } from '@babel/types'
 
 import { generate, t } from '../utils/babel-interop.ts'
 
@@ -32,6 +32,11 @@ import {
   nodeContainsThisMember as classBodyReadsThisMember,
   rewriteFnComponent,
 } from './transform/transform-components.ts'
+import {
+  classPropsReadsAreCovered,
+  collectComponentsUsedAsJsx,
+  inferComponentPropsTypes,
+} from './transform/transform-component-props.ts'
 import { ensureCoreImports, injectTemplateDecls } from './transform/transform-imports.ts'
 import { extractPrecedingStatements, foldEarlyReturnGuards } from './transform/transform-template-methods.ts'
 
@@ -83,9 +88,21 @@ export function transformFile(source: string, _filename?: string, options: Trans
   ctx.directFnComponentParams = collectDirectFnComponentParams(ast, ctx.directFnComponents)
   ctx.directFnStringProps = collectDirectFnStringProps(ast, ctx.directFnComponents)
   ctx.directFnNoDisposer = new Set()
-  ctx.directClassComponents = collectLocalClassComponents(ast)
+  const localComponentNames = collectLocalClassComponents(ast)
+  ctx.directClassComponents = new Set(localComponentNames)
   for (const name of options.directClassComponents ?? []) ctx.directClassComponents.add(name)
   ctx.directFactoryComponents = new Set(options.directFactoryComponents)
+  // Best-effort props shape per locally-declared component, derived from its
+  // JSX call sites in this module — see transform-component-props.ts. Used
+  // below to give the rewritten `extends CompiledXxx<...>` clause a real type
+  // argument instead of falling back to the runtime base's default `P =
+  // Record<string, any>`.
+  const componentPropsShapes = inferComponentPropsTypes(ast, localComponentNames)
+  // Names among `localComponentNames` that appear as a JSX tag anywhere in
+  // this module, resolvable or not. A name absent from this set has NO local
+  // JSX usage site at all (as opposed to having one this file couldn't
+  // classify) — see applyPropsTypeArgument's empty-props branch below.
+  const componentsUsedAsJsx = collectComponentsUsedAsJsx(ast, localComponentNames)
   const rewritten: string[] = []
   // EXPERIMENTAL (ReactiveComponent): component class names that opted into
   // self-reactive-state, captured BEFORE the superclass is rewritten so
@@ -286,18 +303,22 @@ export function transformFile(source: string, _filename?: string, options: Trans
         ctx.importsNeeded.add('CompiledComponent')
         classDecl.superClass = t.identifier('CompiledComponent')
         usesCompiledRuntimeBase = true
+        applyPropsTypeArgument(classDecl, className, componentPropsShapes, componentsUsedAsJsx)
       } else if (useTinyReactiveComponent) {
         ctx.importsNeeded.add('CompiledTinyReactiveComponent')
         classDecl.superClass = t.identifier('CompiledTinyReactiveComponent')
         usesCompiledRuntimeBase = true
+        applyPropsTypeArgument(classDecl, className, componentPropsShapes, componentsUsedAsJsx)
       } else if (useLeanReactiveComponent) {
         ctx.importsNeeded.add('CompiledLeanReactiveComponent')
         classDecl.superClass = t.identifier('CompiledLeanReactiveComponent')
         usesCompiledRuntimeBase = true
+        applyPropsTypeArgument(classDecl, className, componentPropsShapes, componentsUsedAsJsx)
       } else if (t.isIdentifier(classDecl.superClass, { name: 'Component' })) {
         ctx.importsNeeded.add('CompiledReactiveComponent')
         classDecl.superClass = t.identifier('CompiledReactiveComponent')
         usesCompiledRuntimeBase = true
+        applyPropsTypeArgument(classDecl, className, componentPropsShapes, componentsUsedAsJsx)
       }
       if (usesCompiledRuntimeBase && hasAfterRenderAsyncHook && !hasOwnInstanceMethod(classDecl, 'render')) {
         ctx.importsNeeded.add('scheduleAfterRenderAsync')
@@ -460,6 +481,76 @@ function findClassDeclarationByName(ast: File, name: string): ClassDeclaration |
     }
   }
   return null
+}
+
+/**
+ * Thread an inferred props shape onto the rewritten `extends CompiledXxx`
+ * clause as an explicit type argument, e.g. `CompiledComponent<{ app: App }>`.
+ *
+ * Two guards keep this from ever emitting a WRONG type (never just an
+ * incomplete one):
+ *   - If the hand-written source already annotated `extends Component<...>`,
+ *     that `superTypeParameters` node survives the `superClass` identifier
+ *     swap above untouched — do not override the author's own type.
+ *   - If the class body reads a `this.props.<key>` that the inferred shape
+ *     doesn't cover (e.g. a caller in another file passes it, invisible to
+ *     this per-file scan), leave the class with no type argument so it keeps
+ *     the permissive `Record<string, any>` default rather than breaking.
+ *
+ * A class with NO JSX usage site in this file at all (a root component,
+ * mounted by the runtime rather than written as `<App/>` anywhere) gets no
+ * entry in `componentPropsShapes` — inference only ever runs over observed
+ * call sites, so an unobserved component produces no shape, resolvable or
+ * not. Falling back to the permissive `Record<string, any>` default in that
+ * case isn't merely imprecise, it's backwards: silence at every call site is
+ * exactly the evidence that the class takes no props, so the honest emission
+ * is an explicit empty type — `{}` — not the default's promise that it might
+ * accept arbitrary ones.
+ *
+ * Emitting that empty type is gated the same way as the shape-inference path
+ * above, by the SAME two-guard standard, instantiated for the "no props"
+ * claim instead of an inferred one:
+ *   - `!componentsUsedAsJsx.has(className)` — the per-file JSX-usage guard.
+ *     This is a per-file scan, so it cannot see a caller in ANOTHER file
+ *     that writes `<App foo={x}/>`. That is sound here for a reason the
+ *     general shape-inference path above does not get to rely on: the guard
+ *     below additionally requires the class to read NO `this.props.<key>` at
+ *     all, in its own body. A component that genuinely uses props always
+ *     reads at least one, so a cross-file caller passing real data to a
+ *     class that reads none of it would itself be dead-argument surface on
+ *     the CALLER, not a case this class's compiled shape needs to accept.
+ *     Nothing here can silently misbehave: the only externally-visible
+ *     effect of a stricter-than-{} … Record<string, any> narrowing is that
+ *     TypeScript itself would flag an excess/unknown prop at that other JSX
+ *     call site — a loud compile error, not silent wrong behavior, and
+ *     exactly the category of bug an empty props type exists to catch.
+ *   - `classPropsReadsAreCovered(classDecl, <empty type>)` — reuses the
+ *     existing reads-coverage guard against a zero-member shape, i.e. "this
+ *     class's body contains no `this.props.<key>` read whatsoever." This is
+ *     strictly stronger than the non-empty-shape case (which only requires
+ *     coverage of the OBSERVED keys) — here NO key may be read, observed or
+ *     not — so it still catches the shape-inference guard's original worry
+ *     (a real prop consumed only via a cross-file call site) as a special
+ *     case: if the body read that prop, this guard fails and the permissive
+ *     default is kept, exactly as before.
+ */
+function applyPropsTypeArgument(
+  classDecl: ClassDeclaration,
+  className: string,
+  componentPropsShapes: Map<string, TSTypeLiteral>,
+  componentsUsedAsJsx: Set<string>,
+): void {
+  if (classDecl.superTypeParameters) return
+  const propsType = componentPropsShapes.get(className)
+  if (propsType) {
+    if (!classPropsReadsAreCovered(classDecl, propsType)) return
+    classDecl.superTypeParameters = t.tsTypeParameterInstantiation([propsType])
+    return
+  }
+  if (componentsUsedAsJsx.has(className)) return
+  const emptyPropsType = t.tsTypeLiteral([])
+  if (!classPropsReadsAreCovered(classDecl, emptyPropsType)) return
+  classDecl.superTypeParameters = t.tsTypeParameterInstantiation([emptyPropsType])
 }
 
 function collectLocalClassComponents(ast: File): Set<string> {

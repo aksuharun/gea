@@ -10,7 +10,7 @@ export function lis(arr: number[]): number[] {
   const vals: number[] = []
   const idxs: number[] = []
   for (let i = 0; i < n; i++) {
-    if (arr[i] !== -1) {
+    if (arr[i] >= 0) {
       vals.push(arr[i])
       idxs.push(i)
     }

@@ -7,19 +7,34 @@
  * children that's ~3000 closure allocations that GC had to chase. The class
  * form drops that to one shared prototype plus the per-instance `f[]` array
  * and (for children) a single dispose-bridge closure.
+ *
+ * `Disposer` is the CLASS, not an interface over it. The interface had exactly
+ * two implementors — this class and the `NOOP_DISPOSER` object literal — which
+ * made every `Disposer`-typed slot polymorphic between a class instance and a
+ * record, and geatsc has no native carrier for that: the type derives lattice
+ * bottom, so `CompiledComponent`'s `[GEA_DISPOSER] = createDisposer() as
+ * Disposer` field raised `representation-plan coverage gap for
+ * PropertyDeclaration`, and `conditional()`'s `currentChild: Disposer | null`
+ * capture blocked its whole nested-function cluster. One class with a `noop`
+ * flag has a single concrete carrier and behaves identically: a no-op disposer
+ * registers nothing, disposes an empty stack, and hands back itself as its own
+ * child.
  */
 
-export interface Disposer {
-  add(fn: () => void): void
-  dispose(): void
-  child(): Disposer
-}
-
-class _Disposer implements Disposer {
+export class Disposer {
   f: Array<() => void> = []
+  /** A shared no-op disposer ignores registrations and owns no children. */
+  noop: boolean
+
+  constructor(noop = false) {
+    this.noop = noop
+  }
+
   add(fn: () => void): void {
+    if (this.noop) return
     this.f.push(fn)
   }
+
   dispose(): void {
     const f = this.f
     // Hoisted try/catch (one per dispose call, not per iteration) — measurable
@@ -34,19 +49,21 @@ class _Disposer implements Disposer {
     }
     f.length = 0
   }
+
   child(): Disposer {
-    const c = new _Disposer()
+    if (this.noop) return this
+    const c = new Disposer()
     this.f.push(_dispatchChild(c))
     return c
   }
 }
 
-function _dispatchChild(c: _Disposer): () => void {
+function _dispatchChild(c: Disposer): () => void {
   return () => c.dispose()
 }
 
 export function createDisposer(): Disposer {
-  return new _Disposer()
+  return new Disposer()
 }
 
 /**
@@ -57,14 +74,4 @@ export function createDisposer(): Disposer {
  * fresh `{ add() {}, dispose() {}, child() { return this } }` literal per
  * row. 09 clear1k ×8 was paying ~8k object-literal allocations before.
  */
-export const NOOP_DISPOSER: Disposer = {
-  add(_fn: () => void): void {
-    /* no-op */
-  },
-  dispose(): void {
-    /* no-op */
-  },
-  child(): Disposer {
-    return NOOP_DISPOSER
-  },
-}
+export const NOOP_DISPOSER: Disposer = new Disposer(true)
